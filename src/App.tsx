@@ -149,7 +149,7 @@ export default function App() {
     if (!supabase) return;
     let alive = true;
     const check = async () => {
-      const { data, error } = await supabase.auth.getUser();
+      const { data, error } = await supabase!.auth.getUser();
       if (!alive) return;
       if (error && !error.message.toLowerCase().includes('session')) notify(error.message, true);
       setUser(data.user ?? null);
