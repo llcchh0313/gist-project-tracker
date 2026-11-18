@@ -21,3 +21,45 @@
 .activity-edit-form input,.activity-edit-form textarea,.activity-edit-form select{border:1px solid #d8e2ec;border-radius:8px;padding:10px;width:100%;font:inherit;color:#273a51;background:#fff}
 .activity-edit-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px}
 @media(max-width:750px){.demo-banner{flex-wrap:wrap}.preview-actions{margin-left:0;width:100%;justify-content:flex-end}.activity-filter{justify-content:flex-start}}
+
+/* v1.2 document management: preview and production share the same UI. */
+.document-section .document-preview-warning{display:flex;align-items:flex-start;gap:11px;padding:14px 16px;border:1px solid #e7d7a8;background:#fffaf0;border-radius:11px;margin:16px 0;color:#795e2c}
+.document-preview-warning svg{flex:none;margin-top:2px}
+.document-preview-warning div{display:flex;flex-direction:column;gap:4px}
+.document-preview-warning strong{font-size:12px}
+.document-preview-warning span{font-size:11px;line-height:1.7}
+.document-toolbar{display:flex;align-items:center;justify-content:flex-end;gap:12px;margin:18px 0 14px}
+.document-toolbar label{font-size:12px;color:#63748c}
+.document-toolbar select{border:1px solid #dae4ee;border-radius:8px;padding:9px 12px;font-size:12px;color:#29445e;background:#fff}
+.document-list{display:flex;flex-direction:column;gap:10px}
+.document-row{display:flex;align-items:flex-start;gap:13px;border:1px solid #e8edf3;border-radius:11px;padding:16px;background:#fff}
+.document-row .attachment-icon{flex:none}
+.document-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:9px}
+.document-info>strong{font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.document-meta{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:11px;color:#74859a}
+.document-meta .stage-pill{font-size:10px}
+.document-scope-public{color:#267f60;font-weight:700}
+.document-scope-private{color:#a66b28;font-weight:700}
+.document-description{font-size:12px;line-height:1.65;color:#516980;white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
+.document-actions{display:flex;gap:4px;flex:none}
+.document-actions button,.document-file-queue button{background:#f7f9fc;border:1px solid #e5ebf2;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;min-width:31px;height:31px;color:#4a647f;cursor:pointer}
+.document-actions button:hover,.document-file-queue button:hover{background:#eaf1fa;color:#1256a2}
+.document-edit{padding:14px;margin-top:5px;background:#f6f9fd;border:1px solid #e3ebf4;border-radius:11px;display:flex;flex-direction:column;gap:12px}
+.document-edit-actions{display:flex;justify-content:flex-end;gap:8px}
+.document-edit-actions .btn{font-size:11px}
+.document-empty{min-height:136px;border:1px dashed #cfdae6;border-radius:11px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:#8796a5;text-align:center;padding:20px}
+.document-empty strong{font-size:13px;color:#576f86}
+.document-empty span{font-size:11px}
+.document-upload-grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}
+.document-upload .field input[type=file]{width:100%;max-width:100%;font-size:12px;padding:11px;background:#fff;border:1px dashed #cad8e6;border-radius:8px}
+.document-file-queue{background:#fff;border:1px solid #e4eaf1;border-radius:10px;padding:8px 11px;display:flex;flex-direction:column;gap:6px}
+.document-file-queue>div{display:flex;align-items:center;gap:8px;min-width:0;padding:4px 0;font-size:12px;color:#4e6379}
+.document-file-queue span{flex:1;overflow-wrap:anywhere;min-width:0}
+.document-file-queue small{white-space:nowrap;color:#8999a9}
+.document-file-queue button{height:27px;min-width:27px}
+.document-error{font-size:12px;color:#a53a3a;background:#fff1f1;border:1px solid #f1c7c7;border-radius:8px;padding:10px 12px;line-height:1.6}
+@media(max-width:650px){.document-upload-grid{grid-template-columns:1fr}.document-row{flex-wrap:wrap}.document-actions{margin-left:auto}.document-toolbar{justify-content:flex-start}.document-meta{gap:6px}}
+
+/* Override v1.1 generic attachment rules for the new multi-action document row. */
+.document-row .document-actions{display:flex;flex-direction:row;align-items:center;gap:4px;flex:0 0 auto;min-width:auto}
+.document-row .document-info>strong{white-space:normal;overflow-wrap:anywhere;text-overflow:clip}

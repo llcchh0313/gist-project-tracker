@@ -45,6 +45,8 @@ export interface Attachment {
   storage_path: string;
   size_bytes: number;
   mime_type: string;
+  stage: Stage;
+  description: string;
   visible_to_students: boolean;
   created_at: string;
 }

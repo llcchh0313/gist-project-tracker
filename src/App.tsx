@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNo
 import type { User } from '@supabase/supabase-js';
 import {
   Activity, ArrowLeft, ArrowRight, BookOpen, CalendarDays, Check, CheckCircle2,
-  ChevronRight, CircleAlert, Clock3, Download, ExternalLink, FileText, FolderOpen,
+  ChevronRight, CircleAlert, Clock3, ExternalLink, FileText, FolderOpen,
   History, LayoutDashboard, LockKeyhole, LogOut, Mail, Menu, MoreHorizontal,
-  Paperclip, PauseCircle, Plus, Search, Settings2, ShieldCheck, Sparkles, Trash2,
-  Upload, Users, X
+  PauseCircle, Plus, Search, Settings2, ShieldCheck, Sparkles, Trash2,
+  Users, X
 } from 'lucide-react';
 import { configured, isAllowedEmail, supabase } from './supabase';
+import DocumentSection, { validateDocument } from './DocumentSection';
+import { putPreviewDocument, getPreviewDocument, removePreviewDocument, clearPreviewDocuments } from './previewDocuments';
 import { DEMO_PROJECTS, DEMO_UPDATES } from './demo';
 import {
   CATEGORIES, STAGES, STATUSES,
@@ -23,7 +25,6 @@ const date = (s: string | null) => s ? new Date(s.length === 10 ? `${s}T00:00:00
 const inputDate = (s: string | null) => s || '';
 const routeFromHash = () => (location.hash || '#/').replace(/^#/, '');
 const navigate = (path: string) => { location.hash = path; window.scrollTo({ top: 0, behavior: 'smooth' }); };
-const formatBytes = (b: number) => b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
 const defaultInput: ProjectInput = {
   title: '', summary: '', description: '', category: '교내 행사', owner: '',
   start_date: null, end_date: null, stage: 'planning', status: 'planned', is_published: true,
@@ -31,15 +32,15 @@ const defaultInput: ProjectInput = {
 
 /** The public preview is isolated from Supabase. Never send demo writes to production. */
 const previewMode = !configured || new URLSearchParams(window.location.search).get('preview') === '1';
-const PREVIEW_STORE = 'gist-project-tracker-preview-v11';
-function previewSnapshot(): { projects: Project[]; updates: ProjectUpdate[] } {
+const PREVIEW_STORE = 'gist-project-tracker-preview-v11'; // Preserve previous preview edits during upgrade
+function previewSnapshot(): { projects: Project[]; updates: ProjectUpdate[]; attachments: Attachment[] } {
   try {
     const saved = JSON.parse(window.localStorage.getItem(PREVIEW_STORE) || 'null');
     if (saved && Array.isArray(saved.projects) && Array.isArray(saved.updates)) {
-      return { projects: saved.projects as Project[], updates: saved.updates as ProjectUpdate[] };
+      return { projects: saved.projects as Project[], updates: saved.updates as ProjectUpdate[], attachments: Array.isArray(saved.attachments) ? saved.attachments as Attachment[] : [] };
     }
   } catch { /* localStorage may be unavailable or contain old data */ }
-  return { projects: [...DEMO_PROJECTS], updates: [...DEMO_UPDATES] };
+  return { projects: [...DEMO_PROJECTS], updates: [...DEMO_UPDATES], attachments: [] };
 }
 function openPreview() {
   window.location.assign(`${window.location.pathname}?preview=1#/`);
@@ -171,7 +172,7 @@ export default function App() {
   const [demoAdmin, setDemoAdmin] = useState(false);
   const [projects, setProjects] = useState<Project[]>(() => previewMode ? previewSnapshot().projects : []);
   const [updates, setUpdates] = useState<ProjectUpdate[]>(() => previewMode ? previewSnapshot().updates : []);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>(() => previewMode ? previewSnapshot().attachments : []);
   const [audits, setAudits] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(false);
   const [editor, setEditor] = useState<Project | 'new' | null>(null);
@@ -193,9 +194,9 @@ export default function App() {
   useEffect(() => { const onHash = () => { setRoute(routeFromHash()); setMenuOpen(false); }; window.addEventListener('hashchange', onHash); return () => window.removeEventListener('hashchange', onHash); }, []);
   useEffect(() => {
     if (!previewMode) return;
-    try { window.localStorage.setItem(PREVIEW_STORE, JSON.stringify({ projects, updates })); }
+    try { window.localStorage.setItem(PREVIEW_STORE, JSON.stringify({ projects, updates, attachments })); }
     catch { /* Editing still works for this tab if storage is blocked */ }
-  }, [projects, updates]);
+  }, [projects, updates, attachments]);
 
   useEffect(() => {
     if (!api) return;
@@ -303,7 +304,12 @@ export default function App() {
         const del = await api.from('projects').delete().eq('id', p.id);
         if (del.error) throw del.error;
         await reloadProjects();
-      } else { setProjects(old => old.filter(row => row.id !== p.id)); setUpdates(old => old.filter(u => u.project_id !== p.id)); }
+      } else {
+        for (const item of attachments.filter(a => a.project_id === p.id)) await removePreviewDocument(item.id);
+        setProjects(old => old.filter(row => row.id !== p.id));
+        setUpdates(old => old.filter(u => u.project_id !== p.id));
+        setAttachments(old => old.filter(a => a.project_id !== p.id));
+      }
       notify('사업을 삭제했습니다.'); navigate('/admin');
     } catch (e) { notify('삭제 실패: ' + (e as Error).message, true); }
   };
@@ -342,30 +348,74 @@ export default function App() {
     else setUpdates(old => old.filter(u => u.id !== item.id));
     notify('기록을 삭제했습니다.');
   };
-  const uploadFile = async (projectId: string, file: File, visible: boolean) => {
-    if (!api || !admin) throw Error('실제 파일 업로드는 Supabase에 연결한 뒤 사용할 수 있습니다.');
-    if (file.size > 10 * 1024 * 1024) throw Error('파일은 10MB 이하만 업로드할 수 있습니다.');
-    const safeName = file.name.replace(/[^\w.\-가-힣]/g, '_').slice(0, 120);
-    const path = `${projectId}/${crypto.randomUUID()}-${safeName}`;
-    const { error: upErr } = await api.storage.from('project-files').upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false });
-    if (upErr) throw upErr;
-    const { error } = await api.from('attachments').insert({ project_id: projectId, filename: file.name, storage_path: path, size_bytes: file.size, mime_type: file.type || 'application/octet-stream', visible_to_students: visible });
-    if (error) { await api.storage.from('project-files').remove([path]); throw error; }
-    await reloadDetails(projectId); notify('파일을 업로드했습니다.');
+  const uploadFile = async (projectId: string, file: File, visible: boolean, stage: Stage, description: string) => {
+    if (!admin) throw Error('관리자 권한이 없습니다.');
+    validateDocument(file);
+    if (description.length > 500) throw Error('문서 설명은 500자 이하여야 합니다.');
+    const metadata = { project_id: projectId, filename: file.name, size_bytes: file.size, mime_type: file.type || 'application/octet-stream', stage, description, visible_to_students: visible };
+    try {
+      if (api) {
+        const safeName = file.name.replace(/[^\w.\-가-힣]/g, '_').slice(0, 120);
+        const path = `${projectId}/${crypto.randomUUID()}-${safeName}`;
+        const { error: upErr } = await api.storage.from('project-files').upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false });
+        if (upErr) throw upErr;
+        const { error } = await api.from('attachments').insert({ ...metadata, storage_path: path });
+        if (error) { await api.storage.from('project-files').remove([path]); throw error; }
+        await reloadDetails(projectId);
+      } else if (previewMode) {
+        const id = crypto.randomUUID();
+        await putPreviewDocument(id, file);
+        setAttachments(old => [{ ...metadata, id, storage_path: `preview/${id}`, created_at: new Date().toISOString() }, ...old]);
+      } else throw Error('문서 업로드를 사용할 수 없습니다.');
+      notify(`문서 ‘${file.name}’을(를) 첨부했습니다.`);
+    } catch (e) { notify('문서 업로드 실패: ' + (e as Error).message, true); throw e; }
+  };
+  const editFile = async (item: Attachment, stage: Stage, description: string, visible: boolean) => {
+    if (!admin) throw Error('관리자 권한이 없습니다.');
+    if (description.length > 500) throw Error('문서 설명은 500자 이하여야 합니다.');
+    try {
+      if (api) {
+        const { error } = await api.from('attachments').update({ stage, description, visible_to_students: visible }).eq('id', item.id);
+        if (error) throw error;
+        await reloadDetails(item.project_id);
+      } else if (previewMode) {
+        setAttachments(old => old.map(a => a.id === item.id ? { ...a, stage, description, visible_to_students: visible } : a));
+      } else throw Error('문서 수정 기능을 사용할 수 없습니다.');
+      notify('문서 정보를 수정했습니다.');
+    } catch (e) { notify('문서 수정 실패: ' + (e as Error).message, true); throw e; }
   };
   const downloadFile = async (attachment: Attachment) => {
-    if (!api) return;
-    const { data, error } = await api.storage.from('project-files').createSignedUrl(attachment.storage_path, 60, { download: attachment.filename });
-    if (error || !data) { notify(error?.message || '파일 링크 생성 실패', true); return; }
-    window.location.href = data.signedUrl;
+    if (!admin && !attachment.visible_to_students) { notify('열람 권한이 없는 문서입니다.', true); return; }
+    try {
+      if (api) {
+        const { data, error } = await api.storage.from('project-files').createSignedUrl(attachment.storage_path, 60, { download: attachment.filename });
+        if (error || !data) throw error || new Error('파일 다운로드 링크 생성 실패');
+        window.location.assign(data.signedUrl);
+      } else if (previewMode) {
+        const blob = await getPreviewDocument(attachment.id);
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url; link.download = attachment.filename; link.style.display = 'none';
+        document.body.appendChild(link); link.click(); link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+      }
+    } catch (e) { notify('파일 다운로드 실패: ' + (e as Error).message, true); }
   };
   const removeFile = async (attachment: Attachment) => {
-    if (!api || !admin || !confirm(`‘${attachment.filename}’ 파일을 삭제할까요?`)) return;
-    const { error } = await api.storage.from('project-files').remove([attachment.storage_path]);
-    if (error) { notify(error.message, true); return; }
-    const result = await api.from('attachments').delete().eq('id', attachment.id);
-    if (result.error) { notify(result.error.message, true); return; }
-    await reloadDetails(attachment.project_id); notify('파일을 삭제했습니다.');
+    if (!admin || !confirm(`‘${attachment.filename}’ 파일을 삭제할까요?`)) return;
+    try {
+      if (api) {
+        const { error } = await api.storage.from('project-files').remove([attachment.storage_path]);
+        if (error) throw error;
+        const result = await api.from('attachments').delete().eq('id', attachment.id);
+        if (result.error) throw result.error;
+        await reloadDetails(attachment.project_id);
+      } else if (previewMode) {
+        await removePreviewDocument(attachment.id);
+        setAttachments(old => old.filter(a => a.id !== attachment.id));
+      }
+      notify('파일을 삭제했습니다.');
+    } catch (e) { notify('파일 삭제 실패: ' + (e as Error).message, true); }
   };
   const filtered = useMemo(() => projects.filter(p =>
     (admin || p.is_published) &&
@@ -382,10 +432,10 @@ export default function App() {
       <nav className={`topnav ${menuOpen ? 'nav-open' : ''}`} aria-label="주 메뉴"><button className={route === '/' ? 'nav-active' : ''} onClick={() => navigate('/')}><LayoutDashboard size={16}/> 사업 현황</button>{admin && <button className={isAdminPage ? 'nav-active' : ''} onClick={() => navigate('/admin')}><Settings2 size={16}/> 관리자</button>}</nav>
       <div className="header-right">{previewMode && <span className="demo-tag">LOCAL PREVIEW</span>}{!previewMode && user && <span className="user-email">{user.email}</span>}{!previewMode && user && <button className="btn btn-header" onClick={() => void logout()}><LogOut size={16}/> 로그아웃</button>}{previewMode && <button className="btn btn-header" onClick={() => setDemoAdmin(v => !v)}>{demoAdmin ? <><Users size={15}/> 학생 보기</> : <><ShieldCheck size={15}/> 관리자 체험</>}</button>}<button className="menu-button" aria-label="메뉴" onClick={() => setMenuOpen(v => !v)}><Menu size={22}/></button></div>
     </div></header>
-    {previewMode && <div className="demo-banner"><Sparkles size={16}/> <span><strong>체험용 작업공간</strong> · 실제 학생회 사업이 아닌 가상 데이터입니다. 수정 내용은 이 브라우저에만 저장되며 Supabase에는 전송되지 않습니다. 개인정보·공문서를 입력하지 마세요.</span><div className="preview-actions"><button onClick={() => { if (!window.confirm('현재 브라우저의 체험 데이터를 초기화할까요?')) return; setProjects([...DEMO_PROJECTS]); setUpdates([...DEMO_UPDATES]); setAttachments([]); navigate('/'); notify('체험 데이터를 초기화했습니다.'); }}>체험 데이터 초기화</button>{configured && <button onClick={closePreview}>체험 종료</button>}</div></div>}
+    {previewMode && <div className="demo-banner"><Sparkles size={16}/> <span><strong>체험용 작업공간</strong> · 실제 학생회 사업이 아닌 가상 데이터입니다. 수정 내용은 이 브라우저에만 저장되며 Supabase에는 전송되지 않습니다. 개인정보·공문서를 입력하지 마세요.</span><div className="preview-actions"><button onClick={() => { if (!window.confirm('현재 브라우저의 체험 데이터를 초기화할까요?')) return; setProjects([...DEMO_PROJECTS]); setUpdates([...DEMO_UPDATES]); setAttachments([]); void clearPreviewDocuments().catch((e: Error) => notify('체험 파일 초기화 실패: ' + e.message, true)); navigate('/'); notify('체험 데이터를 초기화했습니다.'); }}>체험 데이터 초기화</button>{configured && <button onClick={closePreview}>체험 종료</button>}</div></div>}
     {checking ? <div className="loading-screen"><div className="spinner"/> 사용자 확인 중…</div> : !showApp ? <Login onSignIn={login} loading={authWorking} onPreview={openPreview}/> : <>
       {isAdminPage ? admin ? <AdminDashboard preview={previewMode} projects={projects} audits={audits} onCreate={() => setEditor('new')} onEdit={setEditor} onDelete={deleteProject}/> : <div className="page-wrap"><Empty title="관리자 전용 페이지" body="사업 정보 편집은 승인된 학생회장 계정만 사용할 수 있습니다."/></div>
-      : projectId ? selectedProject ? <ProjectDetails key={projectId} project={selectedProject} updates={updates.filter(u => u.project_id === projectId)} attachments={attachments.filter(a => a.project_id === projectId)} admin={admin} configured={!previewMode} onEdit={() => setEditor(selectedProject)} onUpdate={addUpdate} onEditUpdate={editUpdate} onRemoveUpdate={removeUpdate} onUpload={uploadFile} onDownload={downloadFile} onRemoveFile={removeFile}/> : <div className="page-wrap"><Empty title={loading ? '사업 정보를 불러오는 중' : '사업을 찾을 수 없습니다'} body="존재하지 않거나 열람 권한이 없는 사업입니다."><button className="btn btn-outline" onClick={() => navigate('/')}>목록으로 가기</button></Empty></div>
+      : projectId ? selectedProject ? <ProjectDetails key={projectId} project={selectedProject} updates={updates.filter(u => u.project_id === projectId)} attachments={attachments.filter(a => a.project_id === projectId)} admin={admin} preview={previewMode} onEdit={() => setEditor(selectedProject)} onUpdate={addUpdate} onEditUpdate={editUpdate} onRemoveUpdate={removeUpdate} onUpload={uploadFile} onEditFile={editFile} onDownload={downloadFile} onRemoveFile={removeFile}/> : <div className="page-wrap"><Empty title={loading ? '사업 정보를 불러오는 중' : '사업을 찾을 수 없습니다'} body="존재하지 않거나 열람 권한이 없는 사업입니다."><button className="btn btn-outline" onClick={() => navigate('/')}>목록으로 가기</button></Empty></div>
       : <main><div className="hero"><div className="hero-inner"><div className="hero-content"><span className="hero-kicker"><span className="hero-kicker-dot"/> GIST STUDENT COUNCIL</span><h1>학생회의 모든 사업,<br/><em>과정부터 결과까지.</em></h1><p>무엇을 계획하고, 어디까지 진행했는지.<br/>GIST 학생회를 더 투명하게 연결하는 사업 아카이브입니다.</p><div className="hero-cta"><button className="btn btn-white" onClick={() => document.getElementById('project-list')?.scrollIntoView({ behavior: 'smooth' })}>사업 둘러보기 <ArrowRight size={17}/></button><span><CheckCircle2 size={16}/> {previewMode ? '가상 데이터 체험용' : 'GIST 인증 사용자 전용'}</span></div></div><div className="hero-art" aria-hidden="true"><div className="hero-art-glow"/><div className="hero-floating"><div className="floating-overline"><Activity size={15}/> PROJECT PROGRESS <MoreHorizontal size={20}/></div><div className="floating-heading">사업 추진 현황</div><div className="floating-track"><span/><span/><span/><span/></div><div className="floating-meta"><span>기획 · 준비 · 추진 · 결과</span><b>04 STAGES</b></div></div><div className="hero-ring hero-ring-a"/><div className="hero-ring hero-ring-b"/></div></div></div>
       <div className="page-wrap"><div className="stats-row"><Stat icon={<FolderOpen size={20}/>} number={counts.all} label="전체 사업"/><Stat icon={<Activity size={20}/>} number={counts.active} label="진행 중"/><Stat icon={<CheckCircle2 size={20}/>} number={counts.done} label="완료"/><Stat icon={<Clock3 size={20}/>} number={counts.planned} label="진행 예정"/></div>
       <section id="project-list" className="section"><div className="section-heading"><div><span className="eyebrow blue">PROJECT DIRECTORY</span><h2>사업 현황 살펴보기</h2><p>학생회가 추진하는 다양한 사업과 진행 상황을 확인하세요.</p></div>{admin && <button className="btn btn-primary" onClick={() => setEditor('new')}><Plus size={18}/> 사업 등록</button>}</div>
@@ -413,23 +463,22 @@ function DetailTimeline({ stage, status }: { stage: Stage; status: Status }) {
   const idx = stageIndex(stage);
   return <div className="detail-timeline">{STAGES.map((s, i) => <div className={`timeline-step ${i < idx ? 'step-done' : ''} ${i === idx ? 'step-current' : ''}`} key={s.id}><div className="step-node">{i < idx || (status === 'done' && i === idx) ? <Check size={17}/> : String(i + 1).padStart(2, '0')}</div><div><strong>{s.label}</strong><span>{s.description}</span>{i === idx && <em>{status === 'done' ? '완료됨' : status === 'paused' ? '현재 보류' : '현재 단계'}</em>}</div></div>)}</div>;
 }
-function ProjectDetails({ project: p, updates, attachments, admin, configured: live, onEdit, onUpdate, onEditUpdate, onRemoveUpdate, onUpload, onDownload, onRemoveFile }: {
-  project: Project; updates: ProjectUpdate[]; attachments: Attachment[]; admin: boolean; configured: boolean; onEdit: () => void;
+function ProjectDetails({ project: p, updates, attachments, admin, preview, onEdit, onUpdate, onEditUpdate, onRemoveUpdate, onUpload, onEditFile, onDownload, onRemoveFile }: {
+  project: Project; updates: ProjectUpdate[]; attachments: Attachment[]; admin: boolean; preview: boolean; onEdit: () => void;
   onUpdate: (id: string, stage: Stage, body: string, next: string) => Promise<void>;
   onEditUpdate: (item: ProjectUpdate, stage: Stage, body: string, next: string) => Promise<void>;
-  onRemoveUpdate: (item: ProjectUpdate) => void; onUpload: (id: string, file: File, visible: boolean) => Promise<void>;
-  onDownload: (item: Attachment) => void; onRemoveFile: (item: Attachment) => void;
+  onRemoveUpdate: (item: ProjectUpdate) => void; onUpload: (id: string, file: File, visible: boolean, stage: Stage, description: string) => Promise<void>;
+  onEditFile: (item: Attachment, stage: Stage, description: string, visible: boolean) => Promise<void>;
+  onDownload: (item: Attachment) => Promise<void>; onRemoveFile: (item: Attachment) => Promise<void>;
 }) {
   const [note, setNote] = useState(''); const [next, setNext] = useState(''); const [noteStage, setNoteStage] = useState<Stage>(p.stage);
-  const [sending, setSending] = useState(false); const [file, setFile] = useState<File | null>(null);
-  const [fileVisible, setFileVisible] = useState(true); const [uploading, setUploading] = useState(false);
+  const [sending, setSending] = useState(false);
   const [filterStage, setFilterStage] = useState<'all' | Stage>('all');
   const [editingNote, setEditingNote] = useState<string | null>(null);
   useEffect(() => setNoteStage(p.stage), [p.stage]);
   const sorted = [...updates].sort((a, b) => b.created_at.localeCompare(a.created_at));
   const shownUpdates = sorted.filter(u => filterStage === 'all' || u.stage === filterStage);
   const addNote = async (e: FormEvent) => { e.preventDefault(); if (!note.trim()) return; setSending(true); try { await onUpdate(p.id, noteStage, note, next); setNote(''); setNext(''); } catch { /* error toast in App */ } finally { setSending(false); } };
-  const sendFile = async (e: FormEvent) => { e.preventDefault(); if (!file) return; setUploading(true); try { await onUpload(p.id, file, fileVisible); setFile(null); const input = document.getElementById('document-upload') as HTMLInputElement | null; if (input) input.value = ''; } catch (err) { alert((err as Error).message); } finally { setUploading(false); } };
   return <main className="detail-page page-wrap"><button className="back-link" onClick={() => navigate('/')}><ArrowLeft size={16}/> 전체 사업</button>
     <div className="detail-heading"><div><span className="eyebrow blue">PROJECT OVERVIEW <span className="middot">·</span> {p.category}</span><div className="detail-title-line"><h1>{p.title}</h1><StatusBadge status={p.status}/></div><p>{p.summary}</p></div>{admin && <button className="btn btn-outline" onClick={onEdit}><Settings2 size={17}/> 사업 정보 수정</button>}</div>
     <div className="detail-layout"><div className="detail-main"><section className="content-panel"><div className="panel-heading"><div><span className="panel-eyebrow">01 / ABOUT</span><h2>사업 소개</h2></div><FileText size={22}/></div><div className="description">{p.description || '등록된 설명이 없습니다.'}</div><div className="project-meta"><div><span>담당 부서</span><strong>{p.owner || '미지정'}</strong></div><div><span>시작일</span><strong>{date(p.start_date)}</strong></div><div><span>종료 예정일</span><strong>{date(p.end_date)}</strong></div></div></section>
@@ -438,9 +487,8 @@ function ProjectDetails({ project: p, updates, attachments, admin, configured: l
       {shownUpdates.length ? <div className="activity-list">{shownUpdates.map(u => <article className="activity-item" key={u.id}><span className="activity-point"/><div className="activity-card"><div className="activity-head"><div><StageBadge stage={u.stage}/><time>{date(u.created_at)}</time></div>{admin && <div className="activity-item-actions"><button className="item-delete" onClick={() => setEditingNote(editingNote === u.id ? null : u.id)} aria-label="기록 수정"><Settings2 size={15}/></button><button className="item-delete" onClick={() => onRemoveUpdate(u)} aria-label="기록 삭제"><Trash2 size={15}/></button></div>}</div>{editingNote === u.id && admin ? <UpdateEditor key={u.id} item={u} onSave={onEditUpdate} onCancel={() => setEditingNote(null)}/> : <><p>{u.body}</p>{u.next_action && <div className="next-action"><ArrowRight size={14}/><span><strong>다음 작업</strong> · {u.next_action}</span></div>}</>}</div></article>)}</div> : <Empty title={sorted.length ? '해당 단계의 기록이 없습니다' : '등록된 추진 기록이 없습니다'} body={sorted.length ? '다른 단계를 선택하면 해당 기록을 확인할 수 있습니다.' : '사업 담당자가 추진 과정을 등록하면 이곳에 표시됩니다.'}/>}
       {admin && <form className="update-form" onSubmit={addNote}><h3><Plus size={17}/> 새로운 추진 기록 추가</h3><FormField label="기록할 단계"><select value={noteStage} onChange={e => setNoteStage(e.target.value as Stage)}>{STAGES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select></FormField><FormField label="상세 내용 *"><textarea rows={4} required value={note} onChange={e => setNote(e.target.value)} maxLength={10000} placeholder="오늘 진행된 작업, 협의 내용, 결정 사항, 지연 사유 등을 기록하세요."/></FormField><FormField label="다음 작업 (선택)"><input value={next} maxLength={500} onChange={e => setNext(e.target.value)} placeholder="예: 다음 회의에서 계획 확정"/></FormField><button className="btn btn-primary" type="submit" disabled={sending || !note.trim()}>{sending ? '등록 중…' : '기록 등록'} <Plus size={16}/></button></form>}
     </section>
-    <section className="content-panel"><div className="panel-heading"><div><span className="panel-eyebrow">03 / DOCUMENTS</span><h2>관련 문서 <span className="count-mini">{attachments.length}</span></h2></div><Paperclip size={22}/></div><p className="panel-hint">공개 허용된 사업 문서만 열람할 수 있습니다. 모든 파일은 비공개 저장소에 보관됩니다.</p>{attachments.length ? <div className="attachments">{attachments.map(a => <div className="attachment" key={a.id}><span className="attachment-icon"><FileText size={18}/></span><div><strong title={a.filename}>{a.filename}</strong><span>{formatBytes(a.size_bytes)} · {date(a.created_at)} {admin && !a.visible_to_students && '· 관리자 전용'}</span></div><button aria-label="파일 내려받기" onClick={() => onDownload(a)}><Download size={18}/></button>{admin && <button aria-label="파일 삭제" onClick={() => onRemoveFile(a)}><Trash2 size={17}/></button>}</div>)}</div> : <Empty title="등록된 문서가 없습니다" body="관리자가 공개한 자료가 이곳에 표시됩니다."/>}
-      {admin && <form className="upload-form" onSubmit={sendFile}><h3><Upload size={18}/> 첨부파일 등록</h3><input id="document-upload" type="file" accept=".pdf,.txt,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.hwp,.hwpx" onChange={e => setFile(e.target.files?.[0] || null)} disabled={!live}/><label className="check-line"><input type="checkbox" checked={fileVisible} onChange={e => setFileVisible(e.target.checked)}/><span>일반 학생에게 공개</span></label><p className="form-help">1개 파일 최대 10MB. 비공개 문서는 학생 계정에서 다운로드할 수 없습니다. {live ? '' : '(체험 모드에서는 업로드 불가)'}</p><button className="btn btn-outline" disabled={!live || !file || uploading} type="submit">{uploading ? '업로드 중…' : '파일 업로드'} <Upload size={15}/></button></form>}
-    </section></div><aside className="detail-aside"><div className="side-panel"><span className="panel-eyebrow">PROJECT PROCESS</span><h3>추진 진행도</h3><DetailTimeline stage={p.stage} status={p.status}/><div className="side-status"><span>현재 진행 단계</span><StageBadge stage={p.stage}/></div></div><div className="side-hint"><ShieldCheck size={20}/><div><strong>투명하게 기록되는 사업</strong><p>{live ? '사업 진행 내용은 시간순으로 보관되며, 학생회장 계정만 변경할 수 있습니다.' : '현재는 체험 모드이며, 화면의 수정 내용은 실제 DB에 반영되지 않습니다.'}</p></div></div></aside></div>
+    <DocumentSection projectId={p.id} currentStage={p.stage} attachments={attachments} admin={admin} preview={preview} onUpload={onUpload} onEdit={onEditFile} onDownload={onDownload} onRemoveFile={onRemoveFile}/>
+</div><aside className="detail-aside"><div className="side-panel"><span className="panel-eyebrow">PROJECT PROCESS</span><h3>추진 진행도</h3><DetailTimeline stage={p.stage} status={p.status}/><div className="side-status"><span>현재 진행 단계</span><StageBadge stage={p.stage}/></div></div><div className="side-hint"><ShieldCheck size={20}/><div><strong>투명하게 기록되는 사업</strong><p>{!preview ? '사업 진행 내용은 시간순으로 보관되며, 학생회장 계정만 변경할 수 있습니다.' : '현재는 체험 모드이며, 화면의 수정 내용은 실제 DB에 반영되지 않습니다.'}</p></div></div></aside></div>
   </main>;
 }
 function AdminDashboard({ preview, projects, audits, onCreate, onEdit, onDelete }: {
